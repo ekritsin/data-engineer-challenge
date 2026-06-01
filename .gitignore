@@ -1,0 +1,12 @@
+# Ignore generated streaming data
+minio_data/
+iot-raw-bucket/
+*.json
+*.csv
+*.parquet
+
+# Ignore local logs
+*.log
+
+# Ignore local state/databases 
+*.db
