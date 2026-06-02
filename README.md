@@ -2,13 +2,11 @@
 
 ## Intro
 
-Axpo's infrastructure generates lots of data. Our goal is to make use of this
-data to improve our decision base.
+This repository contains my solution for the Data Engineering Challenge. The objective was to ingest near real-time IoT sensor data, persist it for batch processing, and make it available for BI specialists—all while keeping the solution pragmatic and functional within a tight timebox.
 
-To do so we need you to collect, store and prepare data for BI specialists
-and Data Scientists.
+## 🏗️ 1. Current Architecture (Local Prototype)
 
-## Your mission, should you choose to accept it:
+For this local Docker-based prototype, I implemented a simplified **Lambda-style** architecture to meet the challenge's strict time constraints.
 
 ### Initial position
 
@@ -17,26 +15,47 @@ and Data Scientists.
     * IoT data generator (python, docker)
     * MQTT Broker
 
-### Rule set
+```mermaid
+graph TD
+    A[IoT Data Generator] -->|Publishes JSON| B(MQTT Broker)
+    B -->|Subscribes| C{Python ETL Worker}
+    C -->|Micro-batch & Hive Partition| D[(MinIO / S3 Clone)]
+    C -->|Dual-write JSONB| E[(PostgreSQL)]
+    D -.->|Raw / Historical Data| F[Data Scientists / Batch Jobs]
+    E -.->|Near Real-Time Queries| G[BI Specialists / Dashboards]
 
-* **Please invest no more than 5 to 8 hours.** If you cannot complete the task
-  in this time frame, document where you got stuck, so we can use this as a
-  basis for discussion for your next interview.
-* You're free to choose the tech stack you feel fitting
-* You're allowed to change existing code to suit the purpose
-* If you cant solve a problem you can also skip or simulate it and describe your
-  thoughts.
+```
 
 ### Part One: Coding Challenge
 
-We want to see your coding skills. Implement the following 2-3 steps and
-extend the docker compose environment, so we can run your solution using
-```docker compose up -d```.
+Services Used:
+
+* MQTT Broker: Message ingestion.
+* Python ETL Worker: Custom script with multi-threading and micro-batching.
+* MinIO: S3-compatible object storage for the Raw data layer.
+* PostgreSQL: Relational database acting as the serving layer for BI.
 
 #### Step 1:
 
 The first goal is to collect and store the IoT data as well as the corresponding
 sensors in raw format to a low cost long term storage.
+
+##### Reviving Legacy Code (Dependency Management)
+Issue: The provided IoT Data Generator failed to build due to a pydantic v1 vs. v2 conflict and a C-compiler error with an old version of PyYAML.
+
+Fix: Downgraded the generator's Dockerfile base image to python:3.9-slim to utilize pre-built wheels, successfully bypassing the dependency rot .
+
+##### Implementing the Data Lake (MinIO)
+Deployed MinIO as an S3 alternative to demonstrate a cloud-native mindset.
+
+Implemented an ephemeral minio-init container to automatically provision the iot-raw-bucket on startup.
+
+Partitioning Strategy: Used Hive-style time partitioning (year=YYYY/month=MM/day=DD/hour=HH) in the object keys to optimize future downstream queries.
+
+###### Building the Python ETL Worker
+* Micro-batching: Engineered an in-memory buffer to flush data to MinIO and Postgres every 100 messages or 10 seconds.
+* Thread Safety: Utilized threading.Lock() to prevent race conditions between the asynchronous MQTT on_message callback and the main processing loop.
+* Resiliency: Added exponential backoff retry logic to the database connection to handle Docker container startup lag.
 
 #### Step 2:
 
@@ -44,13 +63,20 @@ The second goal is to make the data available so BI specialists can query
 historical data until current point in time (near real time) for different
 sensors.
 
-#### Step 3 (optional, if there is still time after Part Two):
+##### Enabling Near Real-Time BI (PostgreSQL)
+Deployed PostgreSQL with a highly flexible JSONB schema to absorb unpredictable sensor payload structures.
 
-Implement one of the following features:
+Promoted the dt (Event Time) key to a first-class TIMESTAMPTZ column to allow BI tools to run lightning-fast time-series queries, while keeping the rest of the payload in JSONB.
+
+#### Step 3 :
+
+Improvements suggested: 
 
 * resample IoT data to 1 min mean values
 * data catalogue for customers
 * data quality indicator
+  * Implement a "Shift-Left" data quality check inside the ETL worker.
+    The script evaluates the sensor value against logical physical bounds (0-100) and appends a boolean "is_valid": true/false flag to the payload before it hits the database.
 
 ### Part Two: Solution Design
 
@@ -59,38 +85,56 @@ services and products are out there.
 
 * How would you solve the problem stated in Part One now?
 
-Design you favorite solution to solve the problem. There is no need for any
-code in this part. Just write down your thoughts and arguments in a technical
-draft. Don't lose time over-engineering or over-designing it.
+##### Cons of the Current Solution
+Tightly Coupled Compute and Storage: The ETL worker handles both stream ingestion and database loading. It cannot be scaled independently.
 
-May the following questions help you:
+No Silver/Gold Refinement: The BI team is querying data that is only one step removed from raw JSON.
 
-* How would your favorite architecture look like?
-* What technologies and services would you use?
-* How would you deploy the required infrastructure?
-* How would you monitor your data pipelines?
-* How would you monitor and improve data quality?
-* How would you communicate with customers consuming the data?
-* ...
+Database Bottleneck: While JSONB is great for flexibility, running heavy aggregations over billions of rows in standard PostgreSQL will eventually degrade performance compared to a true OLAP columnar database.
 
-### Evaluation criteria
 
-What we're looking for:
+## ☁️ 5. Proposed Production Architecture & Operational Design
 
-* We want to see what you can do, not what you can't do
-* The ability to determine the actual problem area and find a suitable solution
-* Pragmatic solution, scratch features when necessary, time is short!
-* Document your approach, your decisions, and your general notes directly in
-  your code or in a readme file (for Part One)
+To transition this proof-of-concept into a secure, fault-tolerant, and enterprise-grade system capable of handling billions of data points, I propose a decoupled **Medallion Architecture** using AWS, Databricks, and Apache Airflow.
 
-## Preparations for the interview
+```mermaid
+graph TD
+    %% Ingestion
+    A[IoT Edge / Sensors] -->|MQTT| B(AWS IoT Core)
+    B -->|Streaming Delivery| C[AWS Kinesis Data Streams]
+    
+    %% Storage & Orchestration
+    C -->|Continuous Sink| D[(AWS S3: Bronze Raw Bucket)]
+    
+    %% Orchestration Layer
+    SUBGRAPH Orchestration [Apache Airflow Engine]
+        X[Airflow DAG] -->|Trigger / Monitor| E[Spark Silver Job]
+        X -->|Trigger / Monitor| F[Spark Gold Job]
+    end
 
-* open your project in your IDE
-* have your environment running
-* be prepared to present your approach for 5-10 min (no Slides!)
-* be prepared to answer a few questions after your presentation
+    %% Processing
+    D -->|Read Stream / Schema Enforcement| E
+    E -->|Write Delta Lake| G[(AWS S3: Silver Cleaned Bucket)]
+    G -->|Read & Aggregate| F
+    F -->|Write Delta Lake| H[(AWS S3: Gold Serving Bucket)]
+    
+    %% Consumption
+    H -->|Databricks SQL / Unity Catalog| I[BI Dashboards / Consumers]
 
-# TODOs:
+    style D fill:#cd7f32,stroke:#333,stroke-width:2px
+    style G fill:#c0c0c0,stroke:#333,stroke-width:2px
+    style H fill:#ffd700,stroke:#333,stroke-width:2px
+    style Orchestration fill:#f9f9f9,stroke:#007A87,stroke-width:2px
 
-* improve instructions above
-* let challenge be challenged by internals
+```
+
+## How to Run Locally
+Ensure Docker and Docker Compose are installed.
+
+Clone this repository.
+
+Run docker compose up -d --build.
+
+Access MinIO: http://localhost:9090 (User: minioadmin / Pass: minioadmin)
+
+Access Postgres: Connect your SQL client to localhost:5432 (DB: iot_data, User/Pass: postgres).
