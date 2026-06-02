@@ -4,7 +4,7 @@
 
 This repository contains my solution for the Data Engineering Challenge. The objective was to ingest near real-time IoT sensor data, persist it for batch processing, and make it available for BI specialists—all while keeping the solution pragmatic and functional within a tight timebox.
 
-## 🏗️ 1. Current Architecture (Local Prototype)
+## 1. Current Architecture (Local Prototype)
 
 For this local Docker-based prototype, I implemented a simplified **Lambda-style** architecture to meet the challenge's strict time constraints.
 
@@ -98,34 +98,12 @@ Database Bottleneck: While JSONB is great for flexibility, running heavy aggrega
 To transition this proof-of-concept into a secure, fault-tolerant, and enterprise-grade system capable of handling billions of data points, I propose a decoupled **Medallion Architecture** using AWS, Databricks, and Apache Airflow.
 
 ```mermaid
-graph TD
-    %% Ingestion
-    A[IoT Edge / Sensors] -->|MQTT| B(AWS IoT Core)
-    B -->|Streaming Delivery| C[AWS Kinesis Data Streams]
-    
-    %% Storage & Orchestration
-    C -->|Continuous Sink| D[(AWS S3: Bronze Raw Bucket)]
-    
-    %% Orchestration Layer
-    SUBGRAPH Orchestration [Apache Airflow Engine]
-        X[Airflow DAG] -->|Trigger / Monitor| E[Spark Silver Job]
-        X -->|Trigger / Monitor| F[Spark Gold Job]
-    end
-
-    %% Processing
-    D -->|Read Stream / Schema Enforcement| E
-    E -->|Write Delta Lake| G[(AWS S3: Silver Cleaned Bucket)]
-    G -->|Read & Aggregate| F
-    F -->|Write Delta Lake| H[(AWS S3: Gold Serving Bucket)]
-    
-    %% Consumption
-    H -->|Databricks SQL / Unity Catalog| I[BI Dashboards / Consumers]
-
-    style D fill:#cd7f32,stroke:#333,stroke-width:2px
-    style G fill:#c0c0c0,stroke:#333,stroke-width:2px
-    style H fill:#ffd700,stroke:#333,stroke-width:2px
-    style Orchestration fill:#f9f9f9,stroke:#007A87,stroke-width:2px
-
+graph LR
+    A[Sensors] -->|MQTT| B[AWS IoT Core]
+    B -->|Streaming| C[(S3: Bronze Raw)]
+    C -->|Airflow + PySpark| D[(S3: Silver Clean)]
+    D -->|Airflow + PySpark| E[(S3: Gold Aggregated)]
+    E -->|Databricks SQL| F[BI Dashboards]
 ```
 
 ## How to Run Locally
@@ -133,7 +111,10 @@ Ensure Docker and Docker Compose are installed.
 
 Clone this repository.
 
-Run docker compose up -d --build.
+Run
+```sh
+ docker compose up -d --build
+ ```
 
 Access MinIO: http://localhost:9090 (User: minioadmin / Pass: minioadmin)
 
