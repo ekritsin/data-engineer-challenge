@@ -9,9 +9,15 @@ import threading
 import psycopg2
 from psycopg2.extras import execute_values
 
-###### add here database connection
+# POSTGRESQL (PG) Configuration
+PG_HOST = "postgres"  # Docker service name
+PG_PORT = 5432
+PG_DB = "iot_data"
+PG_USER = "postgres"
+PG_PASSWORD = "postgres"
 
-# Configuration
+
+# MQTT Configuration
 MQTT_BROKER = "mqtt_broker" # Docker service name
 MQTT_PORT = 1883
 MQTT_TOPIC = "#"            # Subscribe to all topics
@@ -31,6 +37,46 @@ s3_client = boto3.client('s3',
     aws_access_key_id='minioadmin',
     aws_secret_access_key='minioadmin'
 )
+
+def init_db():
+    """Initializes the PostgreSQL database and creates the necessary table."""
+    max_retries = 5
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            conn = psycopg2.connect(
+                host=PG_HOST,
+                port=PG_PORT,
+                dbname=PG_DB,
+                user=PG_USER,
+                password=PG_PASSWORD
+            )
+            cursor = conn.cursor()
+            
+            # Create table if it doesn't exist
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sensor_data (
+                    id SERIAL PRIMARY KEY,
+                    payload JSONB,
+                    topic VARCHAR(255),
+                    ingested_at TIMESTAMPTZ
+                );
+            """)
+            conn.commit()
+            cursor.close()
+            print("Database initialized successfully")
+            return conn  # Return the connection for reuse
+        except psycopg2.OperationalError as e:
+            retry_count += 1
+            wait_time = min(2 ** retry_count, 30)  # Exponential backoff, max 30 seconds
+            print(f"Failed to connect to PostgreSQL (attempt {retry_count}/{max_retries}). Retrying in {wait_time}s...")
+            if retry_count >= max_retries:
+                print(f"Failed to connect to PostgreSQL after {max_retries} attempts")
+                raise
+            time.sleep(wait_time)
+
+
 
 def flush_buffer():
     """Saves the current buffer to MinIO and clears it."""
@@ -63,6 +109,27 @@ def flush_buffer():
         print(f"Flushed {len(batch_data)} records to MinIO: {object_key}")
     except Exception as e:
         print(f"Failed to write to MinIO: {e}")
+    
+    try:
+        cur = pg_conn.cursor()
+
+        insert_data = [
+                (
+                    msg.get('_topic', 'unknown'), 
+                    json.dumps(msg),  
+                    msg.get('_ingested_at')
+                ) 
+                for msg in batch_data
+            ]
+        insert_query = """
+            INSERT INTO sensor_data (topic, payload, ingested_at)
+            VALUES %s
+        """
+        execute_values(cur, insert_query, insert_data)
+        pg_conn.commit()
+        cur.close()
+    except Exception as e:
+        print(f"Failed to write to PostgreSQL: {e}")
 
 # MQTT Callbacks
 def on_connect(client, userdata, flags, rc):
@@ -83,6 +150,8 @@ def on_message(client, userdata, msg):
     except Exception as e:
         print(f"Error parsing message: {e}")
 
+# Initialize PostgreSQL database
+pg_conn = init_db()
 # Start MQTT Client
 client = mqtt.Client()
 client.on_connect = on_connect

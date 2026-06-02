@@ -10,3 +10,5 @@ iot-raw-bucket/
 
 # Ignore local state/databases 
 *.db
+
+postgres_data/
